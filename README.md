@@ -1,4 +1,4 @@
-# The Enterprise Security Terraform plugin
+# The Immutability Terraform plugin
 
 This is a [native Terraform plugin](https://www.terraform.io/docs/plugins/basics.html). The purpose of the plugin is to provide an application with secrets during provisioning. This includes:
 
