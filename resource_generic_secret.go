@@ -1,4 +1,4 @@
-package vault
+package main
 
 import (
 	"encoding/json"
@@ -6,8 +6,6 @@ import (
 	"log"
 
 	"github.com/hashicorp/terraform/helper/schema"
-
-	"github.com/hashicorp/vault/api"
 )
 
 func genericSecretResource() *schema.Resource {
@@ -37,7 +35,8 @@ func genericSecretResource() *schema.Resource {
 }
 
 func genericSecretResourceWrite(d *schema.ResourceData, meta interface{}) error {
-	client := meta.(*api.Client)
+	context := meta.(*ResourceContext)
+	client := *context.client
 
 	path := d.Get("path").(string)
 
@@ -59,7 +58,8 @@ func genericSecretResourceWrite(d *schema.ResourceData, meta interface{}) error 
 }
 
 func genericSecretResourceDelete(d *schema.ResourceData, meta interface{}) error {
-	client := meta.(*api.Client)
+	context := meta.(*ResourceContext)
+	client := *context.client
 
 	path := d.Id()
 

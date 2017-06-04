@@ -1,16 +1,27 @@
-package vault
+package main
 
 import (
+	"bytes"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
-	"strings"
+	"net/http"
+	"time"
 
 	"github.com/hashicorp/terraform/helper/schema"
 	"github.com/hashicorp/terraform/terraform"
 	"github.com/hashicorp/vault/api"
-	"github.com/mitchellh/go-homedir"
 )
+
+type ResourceContext struct {
+	client          *api.Client
+	githubOrg       string
+	namespaceDomain string
+}
 
 func Provider() terraform.ResourceProvider {
 	return &schema.Provider{
@@ -23,9 +34,25 @@ func Provider() terraform.ResourceProvider {
 			},
 			"token": &schema.Schema{
 				Type:        schema.TypeString,
-				Required:    true,
+				Optional:    true,
 				DefaultFunc: schema.EnvDefaultFunc("VAULT_TOKEN", ""),
 				Description: "Token to use to authenticate to Vault.",
+			},
+			"personal_access_token": &schema.Schema{
+				Type:        schema.TypeString,
+				Optional:    true,
+				Description: "GitHub Token to use to authenticate to Vault.",
+			},
+			"github_org": &schema.Schema{
+				Type:        schema.TypeString,
+				Optional:    true,
+				Description: "GitHub Org to use to authenticate to Vault.",
+			},
+			"namespace_domain": &schema.Schema{
+				Type:        schema.TypeString,
+				Optional:    true,
+				ForceNew:    true,
+				Description: "Namespace",
 			},
 			"ca_cert_file": &schema.Schema{
 				Type:        schema.TypeString,
@@ -83,17 +110,82 @@ func Provider() terraform.ResourceProvider {
 		ConfigureFunc: providerConfigure,
 
 		DataSourcesMap: map[string]*schema.Resource{
-			"vault_generic_secret": genericSecretDataSource(),
+			"immutability_secret": genericSecretDataSource(),
 		},
 
 		ResourcesMap: map[string]*schema.Resource{
-			"vault_generic_secret": genericSecretResource(),
-			"vault_policy":         policyResource(),
+			"immutability_secret":  genericSecretResource(),
+			"immutability_policy":  policyResource(),
+			"immutability_ssl":     pkiResource(),
+			"immutability_approle": approleResource(),
 		},
 	}
 }
 
+func githubLogin(d *schema.ResourceData) (string, error) {
+	address := d.Get("address").(string)
+	githubOrg := d.Get("github_org").(string)
+	namespaceDomain := d.Get("namespace_domain").(string)
+
+	personalAccessToken := d.Get("personal_access_token").(string)
+	if personalAccessToken == "" || githubOrg == "" || namespaceDomain == "" {
+		return "", errors.New("Missing personal_access_token or github_org or namespace_domain")
+	}
+
+	githubPath := "github/" + namespaceDomain + "/" + githubOrg
+	client := &http.Client{
+		Timeout: time.Second * 10,
+	}
+	vaultCaCertFile := d.Get("ca_cert_file").(string)
+	log.Printf("[DEBUG] CACert File %s", vaultCaCertFile)
+	if vaultCaCertFile != "" {
+		caCert, err := ioutil.ReadFile(vaultCaCertFile)
+		if err != nil {
+			return "", err
+		}
+		caCertPool := x509.NewCertPool()
+		caCertPool.AppendCertsFromPEM(caCert)
+		client = &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					RootCAs: caCertPool,
+				},
+			},
+		}
+	}
+	vaultGitHubURL := address + "/v1/auth/" + githubPath + "/login"
+	log.Printf("[DEBUG] GitHub Login URL %s", vaultGitHubURL)
+	var jsonStr = []byte(`{"token":"` + personalAccessToken + `"}`)
+	authRequest, _ := http.NewRequest("POST", vaultGitHubURL, bytes.NewBuffer(jsonStr))
+	resp, err := client.Do(authRequest)
+	if err != nil {
+		return "", err
+	}
+	if resp == nil {
+		return "", fmt.Errorf("No response from vault during approle auth")
+	}
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("Vault authentication to GitHub Status %d", resp.StatusCode)
+	}
+	var payload api.Secret
+	var htmlData []byte
+	if resp != nil {
+		htmlData, _ = ioutil.ReadAll(resp.Body)
+	}
+	if err != nil {
+		return "", err
+	}
+	err = json.Unmarshal(htmlData, &payload)
+	if err != nil {
+		return "", err
+	}
+	return payload.Auth.ClientToken, nil
+
+}
+
 func providerConfigure(d *schema.ResourceData) (interface{}, error) {
+
 	config := api.DefaultConfig()
 	config.Address = d.Get("address").(string)
 
@@ -128,51 +220,24 @@ func providerConfigure(d *schema.ResourceData) (interface{}, error) {
 	}
 
 	token := d.Get("token").(string)
+	personalAccessToken := d.Get("personal_access_token").(string)
+
+	if personalAccessToken != "" {
+		log.Println("[DEBUG] Using GitHub Login")
+		token, err = githubLogin(d)
+		if err != nil {
+			log.Println("[ERROR] GitHub Login Failed")
+			return nil, err
+		}
+
+	}
 	if token == "" {
-		// Use the vault CLI's token, if present.
-		homePath, err := homedir.Dir()
-		if err != nil {
-			return nil, fmt.Errorf("Can't find home directory when looking for ~/.vault-token: %s", err)
-		}
-		tokenBytes, err := ioutil.ReadFile(homePath + "/.vault-token")
-		if err != nil {
-			return nil, fmt.Errorf("No vault token found: %s", err)
-		}
-
-		token = strings.TrimSpace(string(tokenBytes))
+		return nil, fmt.Errorf("No authentication token was supplied!")
 	}
-
-	// In order to enforce our relatively-short lease TTL, we derive a
-	// temporary child token that inherits all of the policies of the
-	// token we were given but expires after max_lease_ttl_seconds.
-	//
-	// The intent here is that Terraform will need to re-fetch any
-	// secrets on each run and so we limit the exposure risk of secrets
-	// that end up stored in the Terraform state, assuming that they are
-	// credentials that Vault is able to revoke.
-	//
-	// Caution is still required with state files since not all secrets
-	// can explicitly be revoked, and this limited scope won't apply to
-	// any secrets that are *written* by Terraform to Vault.
-
 	client.SetToken(token)
-	renewable := false
-	childTokenLease, err := client.Auth().Token().Create(&api.TokenCreateRequest{
-		DisplayName:    "terraform",
-		TTL:            fmt.Sprintf("%ds", d.Get("max_lease_ttl_seconds").(int)),
-		ExplicitMaxTTL: fmt.Sprintf("%ds", d.Get("max_lease_ttl_seconds").(int)),
-		Renewable:      &renewable,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create limited child token: %s", err)
-	}
-
-	childToken := childTokenLease.Auth.ClientToken
-	policies := childTokenLease.Auth.Policies
-
-	log.Printf("[INFO] Using Vault token with the following policies: %s", strings.Join(policies, ", "))
-
-	client.SetToken(childToken)
-
-	return client, nil
+	var context ResourceContext
+	context.client = client
+	context.githubOrg = d.Get("github_org").(string)
+	context.namespaceDomain = d.Get("namespace_domain").(string)
+	return &context, nil
 }

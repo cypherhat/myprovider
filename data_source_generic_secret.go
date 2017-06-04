@@ -1,4 +1,4 @@
-package vault
+package main
 
 import (
 	"encoding/json"
@@ -7,8 +7,6 @@ import (
 	"time"
 
 	"github.com/hashicorp/terraform/helper/schema"
-
-	"github.com/hashicorp/vault/api"
 )
 
 func genericSecretDataSource() *schema.Resource {
@@ -62,14 +60,15 @@ func genericSecretDataSource() *schema.Resource {
 }
 
 func genericSecretDataSourceRead(d *schema.ResourceData, meta interface{}) error {
-	client := meta.(*api.Client)
+	context := meta.(*ResourceContext)
+	client := *context.client
 
 	path := d.Get("path").(string)
 
 	log.Printf("[DEBUG] Reading %s from Vault", path)
 	secret, err := client.Logical().Read(path)
-	if err != nil {
-		return fmt.Errorf("error reading from Vault: %s", err)
+	if err != nil || secret == nil {
+		return fmt.Errorf("Error reading %s from Vault: %s", path, err)
 	}
 
 	d.SetId(secret.RequestID)

@@ -1,11 +1,10 @@
-package vault
+package main
 
 import (
 	"fmt"
 	"log"
 
 	"github.com/hashicorp/terraform/helper/schema"
-	"github.com/hashicorp/vault/api"
 )
 
 func policyResource() *schema.Resource {
@@ -33,7 +32,8 @@ func policyResource() *schema.Resource {
 }
 
 func policyWrite(d *schema.ResourceData, meta interface{}) error {
-	client := meta.(*api.Client)
+	context := meta.(*ResourceContext)
+	client := *context.client
 
 	name := d.Get("name").(string)
 	policy := d.Get("policy").(string)
@@ -51,7 +51,8 @@ func policyWrite(d *schema.ResourceData, meta interface{}) error {
 }
 
 func policyDelete(d *schema.ResourceData, meta interface{}) error {
-	client := meta.(*api.Client)
+	context := meta.(*ResourceContext)
+	client := *context.client
 
 	name := d.Id()
 
@@ -66,7 +67,8 @@ func policyDelete(d *schema.ResourceData, meta interface{}) error {
 }
 
 func policyRead(d *schema.ResourceData, meta interface{}) error {
-	client := meta.(*api.Client)
+	context := meta.(*ResourceContext)
+	client := *context.client
 
 	name := d.Id()
 
